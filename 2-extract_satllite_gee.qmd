@@ -1,0 +1,413 @@
+---
+title: "2-build_timeseries"
+author: "Jasper Kleinsmann"
+
+---
+
+## Install packages
+```{python}
+!pip install geopandas
+!pip install datatable
+!pip install gee_subset
+```
+## Load packages
+```{python}
+import ee
+import pandas as pd
+from datetime import datetime, date, time, timedelta
+from dateutil.relativedelta import *
+import geopandas as gpd
+import numpy as np
+import datatable as dt
+from datatable import f
+import time
+from pprint import pprint
+import os, re
+from gee_subset import gee_subset
+import shapely.geometry
+import re
+```
+
+## Connect to Google Earth Engine (GEE)
+```{python}
+# Trigger the authentication flow (only first time)
+# ee.Authenticate()
+
+# Initialize the library.
+ee.Initialize()
+```
+
+## Import the plot data 
+Import the plot geosjon with the centroids
+```{python}
+plots = gpd.read_file("data/plot_data/Ghana_plot_centroid.GeoJSON")
+plots_dt = dt.fread("data/plot_data/Ghana_plot_centroid.csv")
+```
+
+Create columns with x and y coordinates
+```{python}
+plots['lon'] = plots['geometry'].x
+plots['lat'] = plots['geometry'].y
+
+x_dt = dt.Frame(plots['lon'])
+y_dt = dt.Frame(plots['lat'])
+plots_dt.cbind(x_dt, y_dt)
+```
+
+Import the plot geosjon with the polygon geometries
+```{python}
+plotsPol = gpd.read_file("data/plot_data/Ghana_plots_all.GeoJSON")
+plotsPol_dt = dt.fread("data/plot_data/Ghana_plots_all.csv")
+```
+
+Create ee.Multipoint (for GPM extraction)
+```{python}
+geom_list = []
+for i in range(x_dt.nrows):
+  point = [x_dt[i, 'lon'], y_dt[i, 'lat']]
+  geom_list.append(point)
+
+centroid_multi = ee.Geometry.MultiPoint(geom_list)
+```
+
+## Set time series period
+```{python}
+start_date = datetime(2013, 1, 1)
+end_date = datetime.today()
+```
+
+
+## Extract the Landsat 8 optical data
+Extract all pixels within the plots for all landsat 8 observations available
+#### Select bands, resolution and the sensor (L8)
+```{python}
+bands = ["SR_B4", "SR_B5", "SR_B6", "QA_PIXEL"]
+scale = 30
+product='LANDSAT/LC08/C02/T1_L2'
+```
+
+
+#### Create function to get yearly dates for the yearly extraction
+```{python}
+def get_year_dates(start, end):
+    yearly_dates = [start]
+    year_diff = (end.year - start.year) + 1
+
+    for i in range(1, year_diff+1):
+        next_year = start_date + relativedelta(years =+ i) 
+        yearly_dates.append(next_year)
+
+    return yearly_dates
+
+year_dates = get_year_dates(start_date, end_date)
+```
+
+
+#### Extract the Landsat 8 data for each plot (loop)
+```{python}
+refl_l8_pol = dt.Frame()
+for pl in range(7817, len(plotsPol)):
+    print(pl)
+
+    g = [i for i in plotsPol.geometry]
+    x,y = g[pl].exterior.coords.xy
+    cords = np.dstack((x,y)).tolist()
+    geometry = ee.Geometry.Polygon(cords)
+    geometry = geometry.buffer(0.000063)
+
+    # Check if geometry exceeds critical size (15ha)
+    if plotsPol['Hectare'].iloc[pl] > 20:
+        print('Area too large --> extracting per year')
+        # Extract data per year to prevent GEE size error
+        for yr in range(len(year_dates)-1):
+            try:
+                col = ee.ImageCollection(product).\
+                    select(tuple(bands)).\
+                    filterDate(year_dates[yr], year_dates[yr+1]).filterBounds(geometry)
+
+
+                # Make a df
+                region = col.getRegion(geometry, int(scale)).getInfo()
+                df = pd.DataFrame.from_records(region[1:len(region)])
+                df.columns = region[0]
+                df = df[['time', 'SR_B4', 'SR_B5', 'SR_B6', 'QA_PIXEL']]
+  
+                df.time = df.time / 1000
+                df['time'] = pd.to_datetime(df['time'], unit = 's')
+                df.rename(columns = {'time': 'date'}, inplace = True)
+                df.sort_values(by = 'date')
+
+                # Transform to dt
+                l8_out = dt.Frame(df)
+
+                # Create column with plotID 
+                l8_out['plotID'] = plotsPol['plotID'].iloc[pl]
+                refl_l8_pol.rbind(l8_out)
+
+            except:
+                pass
+                
+    else:
+        col = ee.ImageCollection(product).\
+            select(tuple(bands)).\
+            filterDate(start_date, end_date).filterBounds(geometry)
+
+        region = col.getRegion(geometry, int(scale)).getInfo()
+
+        # If no pixels in geometry, take centroid of plot
+        if len(region) == 1:
+            print('Not enough pixels in geometry (taking centroid)')
+            
+            geometry = ee.Geometry.Point([plots_dt[pl,'lon'], plots_dt[pl, 'lat']])
+            col = ee.ImageCollection(product).\
+                select(tuple(bands)).\
+                filterDate(start_date, end_date).filterBounds(geometry)
+      
+        region = col.getRegion(geometry, int(scale)).getInfo()
+        df = pd.DataFrame.from_records(region[1:len(region)])
+        df.columns = region[0]
+        df = df[['time', 'SR_B4', 'SR_B5', 'SR_B6', 'QA_PIXEL']]
+  
+        df.time = df.time / 1000
+        df['time'] = pd.to_datetime(df['time'], unit = 's')
+        df.rename(columns = {'time': 'date'}, inplace = True)
+        df.sort_values(by = 'date')
+
+        # Transform to dt
+        l8_out = dt.Frame(df)
+
+        # Create column with plotID 
+        l8_out['plotID'] = plotsPol['plotID'].iloc[pl]
+
+        refl_l8_pol.rbind(l8_out)
+```
+
+#### Write the csv file to local device
+```{python}
+refl_l8_pol.to_csv("output/gee/" + country + "_refl_l8_pol.csv")
+```
+
+
+## Extract Sentinel-1 data
+#### Settings and parameters
+```{python}
+product = "COPERNICUS/S1_GRD"
+instrument = 'IW'
+orbit = 'ASCENDING'
+scale = 10
+g = [i for i in plotsPol.geometry]
+
+# Time series settings
+start_date=datetime(2013, 1, 1)
+end_date=datetime.today()
+```
+
+
+#### Create function to get yearly dates for the yearly extraction
+```{python}
+def get_year_dates(start, end):
+    yearly_dates = [start]
+    year_diff = (end.year - start.year) + 1
+
+    for i in range(1, year_diff+1):
+        next_year = start_date + relativedelta(years =+ i) 
+        yearly_dates.append(next_year)
+
+    return yearly_dates
+
+year_dates = get_year_dates(start_date, end_date)
+```
+
+
+#### Extract the Sentinel-1 data for each plot (loop)
+```{python}
+refl_s1_pol = dt.Frame()
+for pl in range(21300, len(plotsPol)):
+    print(pl)
+
+    g = [i for i in plotsPol.geometry]
+    x,y = g[pl].exterior.coords.xy
+    cords = np.dstack((x,y)).tolist()
+    geometry = ee.Geometry.Polygon(cords)
+    geometry = geometry.buffer(0.000063)
+
+    # Check if geometry exceeds critical size (15ha)
+    if plotsPol['Hectare'].iloc[pl] > 8:
+        print('Area too large --> extracting per year')
+        # Extract data per year to prevent GEE size error
+        for yr in range(len(year_dates)-1):
+            try:
+                col = ee.ImageCollection('COPERNICUS/S1_GRD').\
+                    filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH')).\
+                    filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')).\
+                    filter(ee.Filter.eq('instrumentMode', instrument)).\
+                    filter(ee.Filter.eq('resolution_meters', int(scale))).\
+                    filter(ee.Filter.eq('orbitProperties_pass', orbit)).\
+                    filterDate(year_dates[yr], year_dates[yr+1]).filterBounds(geometry)
+                # Make a df
+                region = col.getRegion(geometry, int(scale)).getInfo()
+                df = pd.DataFrame.from_records(region[1:len(region)])
+                df.columns = region[0]
+                df = df[['time', 'VV', 'VH']]
+  
+                df.time = df.time / 1000
+                df['time'] = pd.to_datetime(df['time'], unit = 's')
+                df.rename(columns = {'time': 'date'}, inplace = True)
+                df.sort_values(by = 'date')
+
+                # Transform to dt
+                s1_out = dt.Frame(df)
+
+                # Create column with plotID 
+                s1_out['plotID'] = plotsPol['plotID'].iloc[pl]
+                refl_s1_pol.rbind(s1_out)
+
+            except:
+                pass
+                
+    else:
+        col = ee.ImageCollection('COPERNICUS/S1_GRD').\
+            filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH')).\
+            filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')).\
+            filter(ee.Filter.eq('instrumentMode', instrument)).\
+            filter(ee.Filter.eq('resolution_meters', int(scale))).\
+            filter(ee.Filter.eq('orbitProperties_pass', orbit)).\
+            filterDate(start_date, end_date).filterBounds(geometry)
+
+        region = col.getRegion(geometry, int(scale)).getInfo()
+
+        # If no pixels in geometry, take centroid of plot
+        if len(region) == 1:
+            print('Not enough pixels in geometry (taking centroid)')
+            
+            geometry = ee.Geometry.Point([plots_dt[pl,'lon'], plots_dt[pl, 'lat']])
+            col = ee.ImageCollection('COPERNICUS/S1_GRD').\
+                filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH')).\
+                filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')).\
+                filter(ee.Filter.eq('instrumentMode', instrument)).\
+                filter(ee.Filter.eq('resolution_meters', int(scale))).\
+                filter(ee.Filter.eq('orbitProperties_pass', orbit)).\
+                filterDate(start_date, end_date).filterBounds(geometry)
+      
+        region = col.getRegion(geometry, int(scale)).getInfo()
+        df = pd.DataFrame.from_records(region[1:len(region)])
+        df.columns = region[0]
+        df = df[['time', 'VV', 'VH']]
+  
+        df.time = df.time / 1000
+        df['time'] = pd.to_datetime(df['time'], unit = 's')
+        df.rename(columns = {'time': 'date'}, inplace = True)
+        df.sort_values(by = 'date')
+
+        # Transform to dt
+        s1_out = dt.Frame(df)
+
+        # Create column with plotID 
+        s1_out['plotID'] = plotsPol['plotID'].iloc[pl]
+
+        refl_s1_pol.rbind(s1_out)
+```
+
+#### Write sentinel-1 csv
+```{python}
+refl_s1_pol.to_csv("output/gee/Ethiopia_refl_s1_pol.csv")
+```
+
+
+## Extract precipitation data (GPM)
+#### Create list of dates with all observations (not used)
+```{python}
+# Specify number of days in period of interest
+d0 = datetime(start_ts.year, start_ts.month, start_ts.day)
+d1 = datetime(end_ts.year, end_ts.month, 1)
+delta = d1 - d0
+days = delta.days
+
+# number of months in period
+def diff_month(d1, d2):
+    return (d1.year - d2.year) * 12 + d1.month - d2.month
+months_ts = diff_month(d1, d0)
+
+# Create list with the dates off all the observations
+months_date = []
+for m in range(months_ts):
+  first_month = start_ts
+  next_month = first_month + relativedelta(months =+ m)
+  months_date.append(next_month)
+```
+
+
+#### Extract the gpm
+```{python}
+gpm = ee.ImageCollection('NASA/GPM_L3/IMERG_V06').\
+       select('precipitationCal').\
+       filterDate(start_ts, end_ts).filterBounds(centroid_multi)
+```
+
+#### Create a function to go over the FeatureCollection and take the monthly sum
+```{python}
+def GPMsum(img_collection):
+  mylist = ee.List([])
+  for m in range(months_ts):
+
+    ini = start_ts + relativedelta(months=+m)
+    end = ini + relativedelta(months=+1) + relativedelta(days=-1)
+
+    sum_image = img_collection.filterDate(ini,end).select(0).sum()
+    mylist = mylist.add(sum_image.set('system:time_start', ini))
+  return ee.ImageCollection.fromImages(mylist)
+```
+
+
+#### Apply the 'GPMsum' function to create FeatureCollection with monthly sum 
+```{python}
+monthlyGPM = ee.ImageCollection(GPMsum(gpm))
+# Sort FeatureCollection by date and create single image with bands
+monthlyGPM_stack = monthlyGPM.sort('system:time_start').toBands().multiply(0.5)
+```
+
+
+#### Write the GPM stack to the drive
+```{python}
+img_todrive = {
+    'description': country + '_GPM_stack',
+    'folder': 'Regreening_Africa',
+    'scale': 11000,
+    'maxPixels': 1e13,
+    'region': centroid_multi,
+    'fileFormat': 'GeoTIFF'}
+
+task = ee.batch.Export.image.toDrive(monthlyGPM_stack, **img_todrive)
+task.start()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

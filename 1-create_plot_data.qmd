@@ -1,4 +1,11 @@
+---
+title: "1-CreatePlotShp"
+author: "Jasper Kleinsmann"
+---
 
+## Load packages
+
+```{r}
 library(data.table)
 library(tidyverse)
 library(dplyr)
@@ -6,57 +13,48 @@ library(sf)
 library(magrittr)
 library(ggplot2)
 library(lwgeom) 
+```
 
+## Indicate the country
+
+```{r}
 country <- 'Rwanda'
+```
 
-#### Import data 
-cohort.tree.tp <- data.table(read_csv(paste0('data/plot_data/', country, '_tp_species.csv')))
-farmer.plot.info.tp <- data.table(read_csv(paste0('data/plot_data/', country, '_tp_profile.csv')))
-plots.csv.tp <- data.table(read_csv(paste0('data/plot_data/', country, '_tp_polygon.csv')))
-cohort.tree.fmnr <- data.table(read_csv(paste0('data/plot_data/', country, '_fmnr_species.csv')))
-farmer.plot.info.fmnr <- data.table(read_csv(paste0('data/plot_data/', country, '_fmnr_profile.csv')))
-plots.csv.fmnr <- data.table(read_csv(paste0('data/plot_data/', country, '_fmnr_polygon.csv')))
+## Import and merge TP and FMNR data
 
-# Only select regreening projects
-farmer.plot.info.tp <- farmer.plot.info.tp[farmer.plot.info.tp$survey_name=='Regreening Africa',]
-farmer.plot.info.fmnr <- farmer.plot.info.fmnr[farmer.plot.info.fmnr$survey_name=='Regreening Africa',]
-cohort.tree.fmnr <- cohort.tree.fmnr[cohort.tree.fmnr$survey_name=='Regreening Africa',]
+```{r}
+cohort.tree <- data.table(read_csv(paste0('data/plot_data/', country, '_tp_species.csv')))
+farmer.plot.info <- data.table(read_csv(paste0('data/plot_data/', country, '_tp_profile.csv')))
+plots.csv <- data.table(read_csv(paste0('data/plot_data/', country, '_tp_polygon.csv')))
 
-cohort.tree.tp$type <- 'tp'
-farmer.plot.info.tp$type <- 'tp'
-plots.csv.tp$type <- 'tp'
-cohort.tree.fmnr$type <- 'fmnr'
-farmer.plot.info.fmnr$type <- 'fmnr'
-plots.csv.fmnr$type <- 'fmnr'
+# Indicate that it is tree planting (tp)
+cohort.tree$type <- 'tp'
+farmer.plot.info$type <- 'tp'
+plots.csv$type <- 'tp'
 
+```
+
+Change some column names
+
+```{r}
 # Make tp and fmrn datasets consistent
-farmer.plot.info.fmnr$fmnr_start <- farmer.plot.info.fmnr$fmnr_start_date
-farmer.plot.info.tp$fmnr_start <- NA
+names(cohort.tree)[names(cohort.tree) == 'tp_latitude'] <- 'latitude'
+names(cohort.tree)[names(cohort.tree) == 'tp_longitude'] <- 'longitude'
+names(cohort.tree)[names(cohort.tree) == 'tp_altitude'] <- 'altitude'
+names(cohort.tree)[names(cohort.tree) == 'tp_accuracy'] <- 'accuracy'
 
-names(cohort.tree.tp)[names(cohort.tree.tp) == 'tp_latitude'] <- 'latitude'
-names(cohort.tree.tp)[names(cohort.tree.tp) == 'tp_longitude'] <- 'longitude'
-names(cohort.tree.tp)[names(cohort.tree.tp) == 'tp_altitude'] <- 'altitude'
-names(cohort.tree.tp)[names(cohort.tree.tp) == 'tp_accuracy'] <- 'accuracy'
-                    
-names(cohort.tree.fmnr)[names(cohort.tree.fmnr) == c('tree_latitude', 'tree_longitude',
-                                                     'tree_altitude','tree_accuracy')] <- c(
-                                                       'latitude','longitude','altitude','accuracy')
-
-# Combine the tp and fmnr datasets
-cohort.tree <- rbind(cohort.tree.tp, cohort.tree.fmnr, fill=T)
-farmer.plot.info <- rbind(farmer.plot.info.tp, 
-                          farmer.plot.info.fmnr[,-c('id', 'land_fenced', 'species_number_start', 'fmnr_start_date')])
-plots.csv <- rbind(plots.csv.tp, plots.csv.fmnr[,-c('id')])
-
-rm(cohort.tree.tp, farmer.plot.info.tp, plots.csv.tp,
-   cohort.tree.fmnr, farmer.plot.info.fmnr, plots.csv.fmnr)
-#### End import
-
+```
 
 # Re-order plot.info data
-farmer.plot.info <- farmer.plot.info[order(farmer.plot.info$farmerID),]
 
-#### MAKE PLOT DATA SPATIAL AND ASSIGN ID
+```{r}
+farmer.plot.info <- farmer.plot.info[order(farmer.plot.info$farmerID),]
+```
+
+## Make the plot data spatial and assign an individual plot ID
+
+```{r}
 # Make sf from plot.geom
 plots.attr <- plots.csv[,-c("area_polygon")] # select all columns except for 'Plot"
 geometry <- st_as_sfc(plots.csv$area_polygon, crs = 4326)
@@ -80,12 +78,14 @@ plots.spat <- plots.spat[order(plots.spat$plotID),]
 plots.spat <- plots.spat[-c(which(duplicated(plots.spat$plotID, fromLast=F))),]
 # Make geometries valid
 plots.spat <- st_make_valid(plots.spat)
+```
 
-#### EXCLUDE/MERGE OVERLAPPING GEOMETRIES
+### Exclude and merge overlapping geometries
+
+```{r}
 # Set buffer of 0m to remove intersection issues
 sf::sf_use_s2(FALSE)
 plots.spat <- st_buffer(plots.spat, 0)
-
 
 # Create empty df to fill
 for (type in unique(plots.spat$type)){
@@ -129,13 +129,13 @@ for (type in unique(plots.spat$type)){
     else{print('Plot already exlcuded')}
   }
 }
-st_write(obj=plots.spat, dsn=paste0('output/plot_data/', country, '/', country, '_plots_filtered.GeoJSON'), driver='GeoJSON')
-plots.spat <- st_read(dsn=paste0('output/plot_data/', country, '/', country, '_plots_filtered.GeoJSON'))
-plots.backup <- plots.spat
+```
 
+## Identify unique plots and give unique ID
 
+If one farmer has multiple plots, then assign a unique ID in the "MultiplePlots" column \#### Do this for plots.spat file
 
-#### INDICATE INDIVIDUAL PLOTS AND GIVE ID
+```{r}
 # for plots.spat dt
 dupl.index <- which(duplicated(plots.spat$farmerID) | duplicated(plots.spat$farmerID, fromLast=TRUE)==T)
 dupl.unique <- unique(plots.spat$farmerID[dupl.index])
@@ -150,8 +150,11 @@ for (i in dupl.unique){
 }
 plots.spat$FarmerPlotID <- NA
 plots.spat$FarmerPlotID <- paste0(plots.spat$farmerID, '_', plots.spat$MultiplePlots)
+```
 
-# for farmer.plot.info dt
+#### Do this for the farmer info dataset
+
+```{r}
 dupl.index <- which(duplicated(farmer.plot.info$farmerID) | duplicated(farmer.plot.info$farmerID, fromLast=TRUE)==T)
 dupl.unique <- unique(farmer.plot.info$farmerID[dupl.index])
 
@@ -165,16 +168,18 @@ for (i in dupl.unique){
 }
 farmer.plot.info$FarmerPlotID <- NA
 farmer.plot.info$FarmerPlotID <- paste0(farmer.plot.info$farmerID, '_', farmer.plot.info$MultiplePlots)
-####
+```
 
+## Combine cohort and plot data based on farmer ID and spatial location
 
-# COMBINE COHORT AND PLOT DATA (BASED ON SPATIAL OVERLAP)
+If one farmer has multiple plots, the cohort data is merged to the plot data based on the spatial coordinates of the cohort data
+
+```{r}
 # Remove the rows with NAs in the longitude, latitude or farmerID
 cohort.tree <- na.omit(cohort.tree, cols=c('longitude', 'latitude','farmerID'))
 # Make the cohort.tree observations spatial
 cohort.spat <- st_as_sf(cohort.tree, coords = c("longitude", "latitude"), crs = 4326)
 
-# Assign plotID to tree data based on location tree
 sf::sf_use_s2(FALSE) # turn of s2 to avoid error in st_intersection
 
 # 1 lat = ~ 111111 m at the equator --> 5m = 0.000045 (7m = 0.000063)
@@ -202,11 +207,13 @@ for (pl in 1:nrow(plots.buf)){
     }
   }
 }
-####
+```
 
+## Assign data to cohort and farmer data
 
-#### ASSIGN DATE 
-# TO COHORT DATA
+#### Cohort data
+
+```{r}
 months <- c('Jan'=1, 'Feb'=2, 'Mar'=3, 'Apr'=4,'May'=5,'Jun'=6,'Jul'=7,'Aug'=8,'Sep'=9,
             'Oct'=10,'Nov'=11,'Dec'=12)
 cohort.spat$plant_date <- as.Date(ISOdate(2000,1,1))
@@ -221,7 +228,11 @@ for (i in 1:nrow(cohort.spat)){
                                                as.integer(split_list[[1]][1]), 
                                                1))
 }
-# TO FARMER DATA
+```
+
+#### Farmer data
+
+```{r}
 farmer.plot.info$plant_date_fmnr <- as.Date(ISOdate(2000,1,1))
 for (i in 1:nrow(farmer.plot.info)){
   print(i)
@@ -233,10 +244,13 @@ for (i in 1:nrow(farmer.plot.info)){
                                                as.integer(split_list[[1]][1]), 
                                                1))
 }
-####
+```
 
+## Indicate the first cohort at each plot
 
-#### INDICATE THE FIRST COHORT AT EACH PLOT (for merging purposes)
+This is done for merging purposes later on. Cause only the first cohort information at each plot will be used to merge to the plot data.
+
+```{r}
 cohort.info <- data.table(st_drop_geometry(cohort.spat)) # remove geometry
 cohort.info$FirstCohortPlotID <- 0
 
@@ -247,11 +261,13 @@ for (i in unique(cohort.info$plotID)){
   first_plant <- which(cohort.info[cohort.info$plotID==i,]$plant_date==min(cohort.info[cohort.info$plotID==i,]$plant_date))[1]
   cohort.info[cohort.info$plotID==i,]$FirstCohortPlotID[first_plant] <- i
 }
-####
+```
 
+## Merge all the data to plot data
 
+#### Merge farmer data to the plot data
 
-#### MERGE DATASETS ON A PLOT LEVEL
+```{r}
 farmer.plot.info.geom <- merge(farmer.plot.info[,c('county_region', 'district_commune_woreda', 
                                                'own_land', 'community_land', 'government_land', 'mosque_church_land', 
                                                'school_land', 'other_land', 'crops', 'croplist', 'unit', 
@@ -260,7 +276,11 @@ farmer.plot.info.geom <- merge(farmer.plot.info[,c('county_region', 'district_co
                                              'type')], 
                                by='FarmerPlotID', all.x=F, all.y=T)
 farmer.plot.info.spat <- st_as_sf(farmer.plot.info.geom) # Make spatial
+```
 
+#### Merge the farmer-plot data to the cohort data
+
+```{r}
 # Add cohort info
 plots.all <- merge(farmer.plot.info.spat, cohort.info[,c('species_name', 'plant_date', 'number_planted', 
                                                          'number_survived', 'woodlot', 'internal_boundary', 
@@ -270,10 +290,13 @@ plots.all <- merge(farmer.plot.info.spat, cohort.info[,c('species_name', 'plant_
                                                          'FirstCohortPlotID','use_firewood', 'local_name','mgt_thinning',
                                                          'mgt_pollarding_lopping','mgt_coppicing','mgt_others')], 
                    by.x='plotID', by.y = 'FirstCohortPlotID', all.x=T, all.y=F)
-####
+```
 
+## Clean plot data for final
 
-#### CLEAN COMBINED DF
+Thing may have changed in the geomtry after the merging of geometries. Therefore the spatial cleaning is done again.
+
+```{r}
 sf::sf_use_s2(FALSE)
 plots.all <- st_buffer(plots.all, 0)
 # Convert multipolygon into single polygons
@@ -281,17 +304,13 @@ plots.all <- st_cast(plots.all, "POLYGON")
 # Recalculate the area after the spatial merges
 plots.all$Hectare <- as.numeric(st_area(plots.all)/10000) # in ha
 plots.all <- plots.all[plots.all$Hectare>0,] # remove plots with area = 0
-# Order on polygon size and then remove duplicates (smallest)
+# Order on polygon size 
 plots.all <- plots.all[order(plots.all$Hectare),]
-plots.all <- plots.all[-c(which(duplicated(plots.all$plotID, fromLast=F))),]
-# Exclude two very large polygons (plodID: "9977", "19871")
-#plots.all <- plots.all[-c(which(plots.all$plotID==9977 | plots.all$plotID==19871)),]
-####
-View(plots.all)
-plots.all
+```
 
+## Create centroids and combined multi-centroid data
 
-#### CHANGE THE GEOMETRIES OF THE PLOT POLYGONS
+```{r}
 # Centroid
 plot.centroid <- st_centroid(plots.all, of_largest_polygon=F)
 
@@ -301,23 +320,15 @@ plot.centroid <- st_centroid(plots.all, of_largest_polygon=F)
 # Multipolygon
 centroid_multi <- plot.centroid %>% 
   st_combine()
-####
+```
 
+## Write the data as GeoJONs and csv
 
-
-#### WRITE THE FILES AS GEOJSON AND CSV
+```{r}
 st_write(obj=plots.all, dsn=paste0('output/plot_data/', country, '/', country, '_plots_all.GeoJSON'), driver='GeoJSON')
 st_write(obj=plots.all, dsn=paste0('output/plot_data/', country, '/', country, '_plots_all.csv'), driver='CSV')
 st_write(obj=plot.centroid, dsn=paste0('output/plot_data/', country, '/', country, '_plot_centroid.GeoJSON'), driver='GeoJSON')
 st_write(obj=plot.centroid, dsn=paste0('output/plot_data/', country, '/', country, '_plot_centroid.csv'), driver='CSV')
 st_write(obj=centroid_multi, dsn=paste0('output/plot_data/', country, '/', country, '_centroid_multi.GeoJSON'), driver='GeoJSON')
 st_write(obj=centroid_multi, dsn=paste0('output/plot_data/', country, '/', country, '_centroid_multi.csv'), driver='CSV')
-
-# Read the polygon data
-plots.all <- st_read(paste0('output/plot_data/', country, '/', country, '_plots_all.GeoJSON'))
-
-
-
-
-
-
+```

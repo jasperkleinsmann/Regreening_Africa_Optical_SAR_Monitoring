@@ -1,11 +1,17 @@
+---
+title: "7-ts_analysis"
+author: "Jasper Kleinsmann"
+---
 
+## Libraries
+
+```{r}
 library(feasts)
 library(tsibble)
 library(forecast)
 library(stats)
 library(zoo)
 library(astsa)
-library(urca) # for kpss test
 library(TSA)
 library(fable)
 library(data.table)
@@ -18,27 +24,44 @@ library(scales)
 library(lubridate)
 library(BBmisc)
 library(readr)
+```
 
+## Select country
+
+```{r}
 country <- 'Kenya'
+```
 
-# Import the l8 and s1 timeseries 
-l8_ts <- data.table(read_csv(paste0('output/time_series/', country, '_l8_ts.csv')))
+## Import time series
+
+```{r}
+# Landsat 8
+l8_ts <- data.table(read_csv(paste0('output/time_series/', country, '_l8_ts.csv'))) 
+# Sentinel-1
 s1_ts <- data.table(read_csv(paste0('output/time_series/', country, '_s1_ts.csv')))
-
-# Import the plots data in include the plant date in the graph
-plots <- data.table(read_csv(paste0('output/plot_data/', country, '/',country, '_plots_filtered.csv')))
-
 # Filter out time stamps before the observation
 l8_ts <- l8_ts[l8_ts$yearmon > as.Date('2013-01-01') & l8_ts$yearmon < as.Date('2022-11-01')] # start L8 observation
 s1_ts <- s1_ts[s1_ts$yearmon > as.Date('2014-01-01') & s1_ts$yearmon < as.Date('2022-11-01')] # start S1 observation
 
-############################# Create tsibble with the lagged variables 
-#### L8
+# Import the plots data in include the plant date in the graph
+plots <- fread(paste0('output/plot_data/', country, '/',country, '_plots_filtered.csv'))
+
+```
+
+# Country-level analysis
+
+## Create country-level tsibble with lagged variables
+
+#### Landsat 8
+
+```{r}
+# Group by yearmon
 l8_ts_lag <- l8_ts %>% 
   group_by(yearmon) %>% 
   summarize(ndvi=mean(ndvi,na.rm=T),
             prcp=mean(prcp_month))
 
+# Create lagged variables
 l8_ts_lag <- l8_ts_lag %>% 
   filter(yearmon >= min(l8_ts$date, na.rm=T)) %>% # Remove rows before first observation
   mutate(yearmonth=yearmonth(as.character(yearmon)),
@@ -47,15 +70,21 @@ l8_ts_lag <- l8_ts_lag %>%
          ndvi_int=na.approx(ndvi)) %>% # Fil gaps in time series
   as_tsibble(index=yearmonth)
 
-l8_ref_lag <- l8_ts_lag %>% filter(year(yearmonth) < 2018)
-l8_val_lag <- l8_ts_lag %>% filter(year(yearmonth) >= 2018)
+# training and validation data
+l8_ref_lag <- l8_ts_lag %>% filter(year(yearmonth) < 2017)
+l8_val_lag <- l8_ts_lag %>% filter(year(yearmonth) >= 2017)
 
-#### S1
+```
+
+#### Sentinel-1
+```{r}
+# Group by yearmon
 s1_ts_lag <- s1_ts %>% 
   group_by(yearmon) %>% 
   summarize(rvi=mean(VV,na.rm=T),
             prcp=mean(prcp_month))
 
+# Create lagged variables
 s1_ts_lag <- s1_ts_lag %>% 
   filter(yearmon >= min(s1_ts$date, na.rm=T)) %>% # Remove rows before first observation
   mutate(yearmonth=yearmonth(as.character(yearmon)),
@@ -66,26 +95,27 @@ s1_ts_lag <- s1_ts_lag %>%
 
 s1_ref_lag <- s1_ts_lag %>% filter(year(yearmonth) < 2018)
 s1_val_lag <- s1_ts_lag %>% filter(year(yearmonth) >= 2018)
-########################### End creating tsibble
+```
 
-
-##################################### Fit and test full model
-#### l8
-# Fit arimax model and look at coeficients
+## Fit SARIMA model (country)
+#### Landsat 8
+```{r}
+# Train model
 l8_armax_mod <- l8_ref_lag %>% 
   model(arima = ARIMA(ndvi ~ prcp + prcp_lag1 + prcp_lag2, stepwise=T, ic='aic')) %>% 
   report()
-gg_tsresiduals(l8_armax_mod)
 
+# Predict values
 l8_fc_ts <- fabletools::forecast(l8_armax_mod, new_data = l8_val_lag[,c('yearmonth', 'prcp', 'prcp_lag1', 'prcp_lag2')])
 
+# Extract confidence intervals
 l8_ts_ci <- l8_fc_ts$ndvi %>% 
   hilo(level = 95) 
 l8_fc_ts <- l8_fc_ts %>% 
   mutate(upper_95=l8_ts_ci$upper,
          lower_95=l8_ts_ci$lower)
 
-# Plot full model
+# Plot results
 ggplot()+
   geom_line(data=l8_ref_lag, 
             aes(x = yearmonth, y = ndvi_int - residuals(l8_armax_mod)$.resid), 
@@ -97,23 +127,26 @@ ggplot()+
   geom_ribbon(data=l8_fc_ts, aes(x=yearmonth, ymin=lower_95, ymax=upper_95),
               alpha=0.1, fill='red', lwd=0.8)+
   labs(y='NDVI', x='Time', title=paste('Actual (green) vs predicted (red) vegetation including 95% CI'))
+```
 
-#### S1
-# Fit arimax model and look at coeficients
+#### Sentinel-1
+```{r}
+# Train model
 s1_armax_mod <- s1_ref_lag %>% 
   model(arima = ARIMA(rvi_int ~ prcp + prcp_lag1 + prcp_lag2, stepwise=T, ic='aic')) %>% 
   report()
-gg_tsresiduals(s1_armax_mod)
 
+# Predict values
 s1_fc_ts <- fabletools::forecast(s1_armax_mod, new_data = s1_val_lag[,c('yearmonth', 'prcp', 'prcp_lag1', 'prcp_lag2')])
 
+# Extract confidence intervals
 s1_ts_ci <- s1_fc_ts$rvi_int %>% 
   hilo(level = 95) 
 s1_fc_ts <- s1_fc_ts %>% 
   mutate(upper_95=s1_ts_ci$upper,
          lower_95=s1_ts_ci$lower)
 
-# Plot full model
+# Plot results
 ggplot()+
   geom_line(data=s1_ref_lag, 
             aes(x = yearmonth, y = rvi_int - residuals(s1_armax_mod)$.resid), 
@@ -124,32 +157,34 @@ ggplot()+
   geom_ribbon(data=s1_fc_ts, aes(x=yearmonth, ymin=lower_95, ymax=upper_95),
               alpha=0.1, fill='red', lwd=0.8)+
   labs(y='RVI', x='Time', title=paste('Actual (green) vs predicted (red) vegetation including 95% CI'))
+```
 
 
-
-#################################################################### PER COUNTY
-################### Aggregate per county and yearmon
-#### L8
-# Take mean ndvi and prcp
+# County-level analysis
+## Create county-level tsibble with lagged variables
+#### Landsat 8
+```{r}
+# Take mean ndvi and prcp per yearmon and county
 l8_ts_by_cnt <- l8_ts %>% 
-  group_by(county_region, yearmon) %>%
+  group_by(county, yearmon) %>%
   summarize(ndvi=mean(ndvi, na.rm=T),
             prcp=mean(prcp_month)) 
-
-l8_ts_by_cnt <- l8_ts_by_cnt %>% rename(county=county_region)
 
 # Lag the prcp
 l8_ts_by_cnt <- l8_ts_by_cnt %>% 
   mutate(prcp_lag1=lag(prcp, 1),
          prcp_lag2=lag(prcp, 2))
+```
 
-# Identify the first observation date
+Exclude rows before 1st observation for each county --> cannot interpolate NA values if 1st or last observation = NA
+```{r}
+# Identify the first observation for each county
 l8_first_obs <- l8_ts_by_cnt %>%
   filter(!is.na(ndvi)) %>% 
   summarize(first_obs=min(yearmon),
             last_obs=max(yearmon))
 
-# Exclude rows before 1st observation for each county
+# Exclude rows before 1st observation for each county 
 l8_ts_cnt <- l8_ts_by_cnt[l8_ts_by_cnt$county==l8_first_obs$county[1] & l8_ts_by_cnt$yearmon >= 
                             l8_first_obs$first_obs[1] & l8_ts_by_cnt$yearmon <= l8_first_obs$last_obs[1],]
 for (i in 2:nrow(l8_first_obs)){
@@ -158,19 +193,23 @@ for (i in 2:nrow(l8_first_obs)){
                                  l8_first_obs$first_obs[i] & l8_ts_by_cnt$yearmon <= l8_first_obs$last_obs[i],]
   l8_ts_cnt <- rbind(l8_ts_cnt, plot_tsibble)
 }
+```
 
-# Make it a tsibble and fill with lagged variables
+Make it a tsibble and interpolate NDVI NA values
+```{r}
 l8_ts_cnt <- l8_ts_cnt %>% 
   mutate(yearmonth=yearmonth(as.character(yearmon)),
          ndvi_int=na.approx(ndvi)) %>% 
   as_tsibble(index=yearmonth, key=county)
 
 # Create reference and validation datasets
-l8_ref_cnt <- l8_ts_cnt %>% filter(year(yearmonth) < 2018)
-l8_val_cnt <- l8_ts_cnt %>% filter(year(yearmonth) >= 2018)
+l8_ref_cnt <- l8_ts_cnt %>% filter(year(yearmonth) < 2017)
+l8_val_cnt <- l8_ts_cnt %>% filter(year(yearmonth) >= 2017)
 
+```
 
-#### S1
+#### Sentinel-1
+```{r}
 s1_ts_by_cnt <- s1_ts %>% 
   group_by(county, yearmon) %>% 
   summarize(rvi=mean(rvi, na.rm=T),
@@ -179,7 +218,10 @@ s1_ts_by_cnt <- s1_ts %>%
 s1_ts_by_cnt <- s1_ts_by_cnt %>% 
   mutate(prcp_lag1=shift(prcp, n=1, type='lag'),
          prcp_lag2=shift(prcp, n=2, type='lag'))
+```
 
+Exclude rows before 1st observation for each county --> cannot interpolate NA values if 1st or last observation = NA
+```{r}
 # Identify the first observation date
 s1_first_obs <- s1_ts_by_cnt %>%
   filter(!is.na(rvi)) %>% 
@@ -195,8 +237,10 @@ for (i in 2:nrow(l8_first_obs)){
                                  s1_first_obs$first_obs[i] & s1_ts_by_cnt$yearmon <= s1_first_obs$last_obs[i],]
   s1_ts_cnt <- rbind(s1_ts_cnt, plot_tsibble)
 }
+```
 
-# Make it a tsibble and fill with lagged variables
+Make it a tsibble and interpolate RVI NA values
+```{r}
 s1_ts_cnt <- s1_ts_cnt %>% 
   mutate(yearmonth=yearmonth(as.character(yearmon)),
          rvi_int=na.approx(rvi)) %>% 
@@ -206,19 +250,18 @@ s1_ts_cnt <- s1_ts_cnt %>%
 s1_ref_cnt <- s1_ts_cnt %>% filter(year(yearmonth) < 2018)
 s1_val_cnt <- s1_ts_cnt %>% filter(year(yearmonth) >= 2018)
 
-##################################### End making COUNTY tsibbles
+```
 
 
-##################################### Forecast vegetation signal per COUNTY
-#### L8
+## Fit SARIMA model (county)
+#### Landsat 8
+```{r}
+# train model per county
 l8_armax_cnt <- l8_ref_cnt %>%
   model(ARIMA(ndvi_int ~ prcp + prcp_lag1 + prcp_lag2, stepwise=T))
-l8_fc_cnt <- fabletools::forecast(l8_armax_cnt, new_data = l8_val_cnt[,c('yearmonth', 'prcp', 'prcp_lag1', 'prcp_lag2', 'county')])
 
-fabletools::forecast(l8_armax_cnt, new_data = l8_val_cnt[,c('yearmonth', 'prcp','prcp_lag1', 'prcp_lag2', 'county')]) %>%
-  autoplot(l8_ts_cnt)+
-  labs(x='Time', y='NDVI')
-accuracy(l8_fc_cnt, l8_ts_cnt)
+# Predict 
+l8_fc_cnt <- fabletools::forecast(l8_armax_cnt, new_data = l8_val_cnt[,c('yearmonth', 'prcp', 'prcp_lag1', 'prcp_lag2', 'county')])
 
 # Extract confidence levels
 l8_cnt_ci <- l8_fc_cnt$ndvi_int %>% 
@@ -226,8 +269,9 @@ l8_cnt_ci <- l8_fc_cnt$ndvi_int %>%
 l8_fc_cnt <- l8_fc_cnt %>% 
   mutate(upper_95=l8_cnt_ci$upper,
          lower_95=l8_cnt_ci$lower)
-# Plot
-cnt <- 'Nyatike'
+
+# Plot per county
+cnt <- 'Nyagatare'
 ggplot()+
   geom_line(data=l8_ref_cnt[l8_ref_cnt$county==cnt,], 
             aes(x = yearmonth, y = ndvi - residuals(l8_armax_cnt[l8_armax_cnt$county==cnt,])$.resid), 
@@ -240,16 +284,16 @@ ggplot()+
   geom_ribbon(data=l8_fc_cnt[l8_fc_cnt$county==cnt,], aes(x=yearmonth, ymin=lower_95, ymax=upper_95),
               alpha=0.1, fill='red')+
   labs(y='NDVI', x='Time', title=paste('Actual (green) vs predicted (red) NDVI in',cnt,'including 95% CI'))
+```
 
-#### S1
+#### Senintel-1
+```{r}
+# Train model
 s1_armax_cnt <- s1_ref_cnt %>%
-  model(ARIMA(VV_int ~ prcp + prcp_lag1 + prcp_lag2 + pdq(1, 0, 1) + PDQ(0, 0, 0)))
-s1_fc_cnt <- forecast(s1_armax_cnt, new_data = s1_val_cnt[,c('yearmonth', 'prcp', 'prcp_lag1', 'prcp_lag2', 'county')])
+  model(ARIMA(rvi_int ~ prcp + prcp_lag1 + prcp_lag2, stepwise=T))
 
-forecast(s1_armax_cnt, new_data = s1_val_cnt[,c('yearmonth', 'prcp', 'prcp_lag1', 'prcp_lag2', 'county')]) %>%
-  autoplot(s1_ts_cnt)+
-  labs(x='Time', y='NDVI')
-accuracy(s1_fc_cnt, s1_ts_cnt)
+# Predict
+s1_fc_cnt <- forecast(s1_armax_cnt, new_data = s1_val_cnt[,c('yearmonth', 'prcp', 'prcp_lag1', 'prcp_lag2', 'county')])
 
 # Extract confidence levels
 s1_cnt_ci <- s1_fc_cnt$VV_int %>% 
@@ -258,28 +302,27 @@ s1_fc_cnt <- s1_fc_cnt %>%
   mutate(upper_95=s1_cnt_ci$upper,
          lower_95=s1_cnt_ci$lower)
 
-# Plot
-cnt <- 'Bwaku West'
+# Plot per county
+cnt <- 'Nyagatare'
 ggplot()+
   geom_line(data=s1_ref_cnt[s1_ref_cnt$county==cnt,], 
             aes(x = yearmonth, y = VV_int - residuals(s1_armax_cnt[s1_armax_cnt$county==cnt,])$.resid), 
             col='darkred',lwd=0.65, alpha=0.6) +
   geom_line(data=s1_ts_cnt[s1_ts_cnt$county==cnt,], aes(x=yearmonth, y=VV_int), col='darkgreen',lwd=0.7)+
   geom_line(data=s1_ts_cnt[s1_ts_cnt$county==cnt,], 
-            aes(x=yearmonth, y=normalize(prcp, method='range',c(-15,-14))), col='blue')+
+            aes(x=yearmonth, y=normalize(prcp, method='range',c(0.3,0.4))), col='blue')+
   geom_line(data=s1_fc_cnt[s1_fc_cnt$county==cnt,], aes(x = yearmonth, y = .mean),
             col='darkred',lwd=0.65,lty=2)+
   geom_ribbon(data=s1_fc_cnt[s1_fc_cnt$county==cnt,], aes(x=yearmonth, ymin=lower_95, ymax=upper_95),
               alpha=0.1, fill='red')+
-  labs(y='VVn', x='Time', title=paste('Actual (green) vs predicted (red) VV backscatter in',cnt,'including 95% CI'))
-
-############################################################### END PER COUNTY
-
+  labs(y='RVI', x='Time', title=paste('Actual (green) vs predicted (red) RVI in',cnt,'including 95% CI'))
+```
 
 
-############################################################### PER PLOT
-################### Aggregate per plot and yearmonth
-##### L8
+# Plot-level analysis
+## Create plot-level tsibble with lagged variables
+#### Landsat 8
+```{r}
 l8_ts_by_plt <- l8_ts %>% 
   group_by(plotID, yearmon) %>% 
   summarize(ndvi=mean(ndvi, na.rm=T),
@@ -288,7 +331,9 @@ l8_ts_by_plt <- l8_ts %>%
 l8_ts_by_plt <- l8_ts_by_plt %>% 
   mutate(prcp_lag1=data.table::shift(prcp, n=1, type='lag'),
          prcp_lag2=data.table::shift(prcp, n=2, type='lag')) 
-
+```
+Exclude rows before 1st observation for each plot --> cannot interpolate NA values if 1st or last observation = NA
+```{r}
 # Identify the first observation date 
 l8_first_obs_plt <- l8_ts_by_plt %>%
   filter(!is.na(ndvi)) %>% 
@@ -304,12 +349,12 @@ for (i in 2:nrow(l8_first_obs_plt)){
   l8_ts_plt <- rbind(l8_ts_plt, plot_tsibble)
 }
 
-# Make it a tsibble and interpolate the NAs
+
+```
+Make it a tsibble, interpolate the NAs and write as csv
+```{r}
 l8_ts_plt <- l8_ts_plt %>% 
   mutate(ndvi_int=na.approx(ndvi))
-
-fwrite(l8_ts_plt, paste0('output/time_series/', country, '_l8_plt.csv'))
-l8_ts_plt <- data.table(read_csv(paste0('output/time_series/', country, '_l8_plt.csv')))
 
 l8_ts_plt <- l8_ts_plt %>% 
   mutate(yearmonth=yearmonth(as.character(yearmon))) %>% 
@@ -319,10 +364,12 @@ l8_ts_plt <- l8_ts_plt %>%
 l8_ref_plt <- l8_ts_plt %>% filter(year(yearmonth) < 2017)
 l8_val_plt <- l8_ts_plt %>% filter(year(yearmonth) >= 2017)
 
+# Write the plot-level tsibble
+fwrite(l8_ts_plt, paste0('output/time_series/', country, '_l8_plt.csv'))
+```
 
-
-
-##### S1
+#### Sentinel-1
+```{r}
 s1_ts_by_plt <- s1_ts %>% 
   group_by(plotID, yearmon) %>% 
   summarize(VV=mean(VV, na.rm=T),
@@ -331,7 +378,9 @@ s1_ts_by_plt <- s1_ts %>%
 s1_ts_by_plt <- s1_ts_by_plt %>% 
   mutate(prcp_lag1=shift(prcp, n=1, type='lag'),
          prcp_lag2=shift(prcp, n=2, type='lag')) 
-
+```
+Exclude rows before 1st observation for each plot --> cannot interpolate NA values if 1st or last observation = NA
+```{r}
 # Identify the first observation date 
 s1_first_obs_plt <- s1_ts_by_plt %>%
   filter(!is.na(VV)) %>% 
@@ -346,7 +395,9 @@ for (i in 2:nrow(s1_first_obs_plt)){
                                  s1_first_obs_plt$first_obs[i] & s1_ts_by_plt$yearmon <= s1_first_obs_plt$last_obs[i],]
   s1_ts_plt <- rbind(s1_ts_plt, plot_tsibble)
 }
-
+```
+Make it a tsibble, interpolate the NAs and write as csv
+```{r}
 # Make it a tsibble and interpolate the NAs
 s1_ts_plt <- s1_ts_plt %>% 
   mutate(yearmonth=yearmonth(as.character(yearmon)),
@@ -357,18 +408,19 @@ s1_ts_plt <- s1_ts_plt %>%
 s1_ref_plt <- s1_ts_plt %>% filter(year(yearmonth) < 2018)
 s1_val_plt <- s1_ts_plt %>% filter(year(yearmonth) >= 2018)
 
+# Write as csv
 fwrite(s1_ts_plt, paste0('Rdata/output/time_series/', country, '_s1_plt.csv'))
-s1_ts_plt <- data.table(read_csv(paste0('Rdata/output/time_series/', country, '_s1_plt.csv')))
+```
 
-
-##################################### Forecast vegetation signal per PLOT
-#### L8
+## Fit SARIMA model (plot)
+#### Landsat 8
+```{r}
+# Train model
 l8_armax_plt <- l8_ref_plt %>%
   model(ARIMA(ndvi_int ~ prcp_lag1 + prcp_lag2 + pdq(1, 0, 1) + PDQ(1, 0, 0)))
-l8_fc_plt <- fabletools::forecast(l8_armax_plt, new_data = l8_val_plt[,c('yearmonth', 'prcp_lag1', 'prcp_lag2', 'plotID')])
 
-components(l8_fc_plt)
-accuracy(l8_fc_plt, l8_ts_plt)
+# Predict
+l8_fc_plt <- fabletools::forecast(l8_armax_plt, new_data = l8_val_plt[,c('yearmonth', 'prcp_lag1', 'prcp_lag2', 'plotID')])
 
 # Extract confidence levels
 l8_plt_ci <- l8_fc_plt$ndvi_int %>% 
@@ -377,12 +429,11 @@ l8_fc_plt <- l8_fc_plt %>%
   mutate(upper_95=l8_plt_ci$upper,
          lower_95=l8_plt_ci$lower)
 
+# save model and forecast
 save(l8_fc_plt, file = paste0('output/models/', country,'_l8_fc_plt.RDS'))
 save(l8_armax_plt, file = paste0('output/models/', country,'_l8_armax_plt.RDS'))
-load(paste0('output/models/', country, '_l8_fc_plt.RDS'))
-load(paste0('output/models/', country, '_l8_armax_plt.RDS'))
 
-# Plot
+# Plot result per plot
 plt <- 5602
 ggplot()+
   geom_line(data=l8_ref_plt[l8_ref_plt$plotID==plt,], 
@@ -398,14 +449,16 @@ ggplot()+
   geom_point(data = l8_ts[l8_ts$plotID==plt,], aes(x = yearmon, y = ndvi), alpha=0.5)+
   geom_vline(xintercept=plots[plots$plotID==plt,]$plant_date,lty=3,alpha=0.75)+
   labs(y='NDVI', x='Time', title=paste('Actual (green) vs predicted (red) NDVI in including 95% CI'))
+```
 
-
-#### S1
+#### Sentinel-1
+```{r}
+# Train model 
 s1_armax_plt <- s1_ref_plt %>%
   model(ARIMA(VV_int ~ prcp + prcp_lag1 + prcp_lag2 + pdq(1, 0, 1) + PDQ(1, 0, 0)))
-s1_fc_plt <- forecast(s1_armax_plt, new_data = s1_val_plt[,c('yearmonth', 'prcp', 'prcp_lag1', 'prcp_lag2', 'plotID')])
 
-accuracy(s1_fc_plt, s1_ts_plt)
+# Predict
+s1_fc_plt <- forecast(s1_armax_plt, new_data = s1_val_plt[,c('yearmonth', 'prcp', 'prcp_lag1', 'prcp_lag2', 'plotID')])
 
 # Extract confidence levels
 s1_plt_ci <- s1_fc_plt$VV_int %>% 
@@ -414,10 +467,11 @@ s1_fc_plt <- s1_fc_plt %>%
   mutate(upper_95=s1_plt_ci$upper,
          lower_95=s1_plt_ci$lower)
 
-save(s1_fc_plt, file = "output/models/Rwanda_s1_fc_plt.RDS")
-load("output/models/Rwanda_s1_plt_fc.RDS")
+# Save model and forecast
+save(s1_armax_plt, file = paste0('output/models/', country,'_s1_fc_plt.RDS'))
+save(s1_fc_plt, file = paste0('output/models/', country,'_s1_armax_plt.RDS'))
 
-# Plot
+# Plot per plot
 plt <- 15035
 ggplot()+
   geom_line(data=s1_ref_plt[s1_ref_plt$plotID==plt,], 
@@ -433,3 +487,4 @@ ggplot()+
   geom_point(data = s1_ts[s1_ts$plotID==plt,], aes(x = yearmon, y = VV), alpha=0.5)+
   geom_vline(xintercept=plots[plots$plotID==plt,]$plant_date,lty=3,alpha=0.75)+
   labs(y='VV', x='Time', title=paste('Actual (green) vs predicted (red) VV in including 95% CI'))
+```

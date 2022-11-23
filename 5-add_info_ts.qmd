@@ -1,59 +1,106 @@
+---
+title: "6-Add_info_ts"
+author: "Jasper Kleinsmann"
+---
 
-#### Import
+
+## Libraries 
+```{r}
+library(sf)
+library(tidyverse)
+library(data.table)
+```
+
+## Select country 
+```{r}
 country <- 'Rwanda'
-# Plot data
+```
+
+## Import 
+```{r}
+# Plots data
 plots <- st_read(dsn=paste0('output/plot_data/', country, '/', country, '_plots_all.GeoJSON'))
+# Plots centroid data
 plots_pnt <- st_read(dsn=paste0('output/plot_data/', country, '/', country, '_plot_centroid.GeoJSON'))
-gpm_month <- data.table(read_csv(paste0('output/time_series/gpm/', country, '_gpm_monthly.csv')))
-refl_l8 <- data.table(read_csv(paste0('output/time_series/', country, '_aggr_vi_l8.csv')))
-refl_s1 <- data.table(read_csv(paste0('output/time_series/', country, '_aggr_vi_s1.csv')))
+# GPM csv data
+gpm_month <- fread(paste0('output/time_series/gpm/', country, '_gpm_monthly.csv'))
+# Aggregated L8 and S1 data with VIs
+refl_l8 <- fread(paste0('output/time_series/', country, '_aggr_vi_l8.csv'))
+refl_s1 <- fread(paste0('output/time_series/', country, '_aggr_vi_s1.csv'))
 
-# Read spatial data
-admin <- st_read(paste0('data/admin_boundaries/', country,'/gha_admbnda_adm2_gss_20210308.shp'))
+# Read the administrative boundaries
+admin <- st_read(paste0('data/admin_boundaries/', country,'/rwa_adm2_2006_NISR_WGS1984_20181002.shp'))
+```
 
-# Clean plot data
+## Clean plot data
+```{r}
 names(plots)[names(plots) == 'district_commune_woreda'] <- 'county'
+names(plots)[names(plots) == 'county_region'] <- 'region'
+```
 
-## GENERAL
+## Assign county and region names
+Spatially intersect the plot centroid data with the adminstrative data to assign county and regions to the plot data accurately
+```{r}
 admin <- st_transform(admin, crs=st_crs(plots))
 
 sf::sf_use_s2(FALSE) 
+
 county_index <- st_within(plots_pnt, admin, sparse=T)
 null_counties <- which(sapply(county_index,length)==0)
 county_index[null_counties] <- NA
 county_index <- unlist(county_index)
 plots$county <- admin$ADM2_EN[unlist(county_index)]
+plots$region <- admin$ADM1_EN[unlist(county_index)]
 
+# Remove the plots that fall outside the country borders
 plots <- plots[!is.na(plots$county),]
+```
 
+## Write plot GeoJSON
+```{r}
 st_write(plots, dsn=paste0('output/plot_data/', country, '/', country, '_plots_final.GeoJSON'))
-plots <- st_read(dsn=paste0('output/plot_data/', country, '/', country, '_plots_final.GeoJSON'))
+```
 
-# Add information gpm
+
+## Add GPM and county data to relfectance time series
+Select columns and remove geometry
+```{r}
 gpm_month <- merge(gpm_month, plots[,c('plotID', 'county')], 
                    by='plotID')
 gpm_month <- gpm_month[,-c('geometry')]
 
-# clean and merge refl datasets
+```
+
+#### Landsat 8
+```{r}
+# Add GPM data
 l8_ts <- merge(refl_l8, gpm_month[,c('plotID', 'yearmon','prcp_month')],
                by=c('plotID', 'yearmon'), all.y=T)
+
+# Add county and region data, and plant_date
 l8_ts <- merge(l8_ts, plots[,c('plotID', 'county', 'county_region', 'plant_date')], 
                by=c('plotID'),all.y=F)
+
 l8_ts <- l8_ts[,-c('geometry')]
 l8_ts <- l8_ts[order(l8_ts$yearmon),]
+```
 
+#### Sentinel-1
+```{r}
+# Add GPM data
 s1_ts <- merge(refl_s1, gpm_month[,c('plotID', 'yearmon','prcp_month')],
                by=c('plotID', 'yearmon'), all.y=T)
+
+# Add county and region data, and plant_date
 s1_ts <- merge(s1_ts, plots[,c('plotID', 'county')], 
                by=c('plotID'),all.y=F)
+
 s1_ts <- s1_ts[,-c('geometry')]
 s1_ts <- s1_ts[order(s1_ts$yearmon),]
+```
 
-# Write cleaned L8 and S1 ts
+## Write the L8 and S1 reflenctance time series
+```{r}
 fwrite(l8_ts, paste0('output/time_series/', country, '_l8_ts.csv'))
 fwrite(s1_ts, paste0('output/time_series/', country, '_s1_ts.csv'))
-
-rm(refl_l8, refl_s1)
-
-
-
+```
