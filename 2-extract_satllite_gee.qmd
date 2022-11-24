@@ -1,7 +1,6 @@
 ---
-title: "2-build_timeseries"
+title: "2-extract_satllite_gee"
 author: "Jasper Kleinsmann"
-
 ---
 
 ## Install packages
